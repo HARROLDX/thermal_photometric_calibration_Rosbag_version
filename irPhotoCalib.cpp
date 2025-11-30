@@ -405,19 +405,112 @@ void IRPhotoCalib::EstimateSpatialParameters()
   cout << "Spatial Params Estimation Done\n";
 }
 
-Mat IRPhotoCalib::getCorrectedImage(Mat & image, PTAB & PT_params){
-  Mat float_image, corrected_frame, colormap_corrected_frame;
-  image.convertTo(float_image, CV_32FC1, 1/255.0);
-  m_mutex.lock();
-  Mat corrected_float_frame = ((float_image * (float)(PT_params.a-PT_params.b) + (float)PT_params.b) - m_params_PS)*(float)255.0;
-  m_mutex.unlock();
-  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> eigen_image = mapCV2Eigen(corrected_float_frame);
-  auto cyclic_eigen_image = eigen_image.unaryExpr([](const int x) { return x%256; }).cast<float>();
-  Mat cyclic_float_image = mapEigen2CV(cyclic_eigen_image);
-  cyclic_float_image.convertTo(corrected_frame, CV_8UC1, 1);
-  LUT(corrected_frame, m_lut, colormap_corrected_frame); 
-  return colormap_corrected_frame;
+//直方图均衡化有一个很明显的缺点，由于它是一种全局优化，与具体纹理无关，使得增强后的图像会出现一些不自然的纹理
+//Gamma光度矫正     对于增强图中灰度值低于tlow的像素置零，高于thigh的置为255，其余的点进行一次线性变化
+//图像细节处理
+
+void IRPhotoCalib::ContrastEnhance(const cv::Mat &img_input, cv::Mat &img_output, float gamma, float to_low, float to_high) {
+    int i, j;
+    float size = img_input.rows * img_input.cols;
+
+    cv::Mat src, dst, hsv;
+    std::vector<cv::Mat> hsv_planes;
+
+
+    if (img_input.channels() == 3) {
+        cv::cvtColor(img_input, hsv, cv::COLOR_BGR2HSV);  
+        src = hsv_planes[2];  
+    } else {
+        src = img_input;  // 对于灰度图像，直接使用原图
+    }
+
+    // 初始化直方图（hist_为存储直方图的数组）
+    int hist_[256] = {0};  // 统计每个灰度级别的像素数量
+
+    // 计算直方图
+    const uchar *p_img;
+    for (i = 0; i < src.rows; i++) {
+        p_img = src.ptr<uchar>(i);
+        for (j = 0; j < src.cols; j++) {
+            hist_[p_img[j]]++;
+        }
+    }
+
+    // 计算累积分布函数（CDF）
+    float cdf_value, sum = 0.;
+    int ilow = 0;
+    int ihigh = 255;
+    bool flag_low = true, flag_high = true;
+
+    for (i = 0; i < 256; i++) {
+        sum = sum + hist_[i];
+        cdf_value = sum / size;
+
+        // 寻找低阈值和高阈值
+        if (flag_low && (cdf_value > to_low)) {
+            ilow = i;
+            flag_low = false;
+        }
+
+        if (flag_high && (cdf_value > to_high)) {
+            ihigh = i;
+            flag_high = false;
+        }
+    }
+
+    // 计算对比度调整的系数k
+    float k = 255.0 / (ihigh - ilow);
+
+    // 创建查找表（LUT）
+    uchar lookup_table[256];
+    for (i = 0; i < 256; ++i) {
+        if (i <= ilow) {
+            lookup_table[i] = 0;
+        } else if (i >= ihigh) {
+            lookup_table[i] = 255;
+        } else {
+            lookup_table[i] = cv::saturate_cast<uchar>(pow(k * (i - ilow), gamma));  // 使用伽马公式调整对比度
+        }
+    }
+
+
+    cv::Mat lut(1, 256, CV_8UC1, lookup_table);  
+    cv::LUT(src, lut, dst);  // 应用LUT进行对比度增强
+
+
+    if (img_input.channels() == 3) {
+        hsv_planes[2] = dst;  
+        merge(hsv_planes, hsv);  
+        cv::cvtColor(hsv, img_output, cv::COLOR_HSV2BGR);  
+    } else {
+        img_output = dst;  // 如果是灰度图像，直接输出处理后的结果
+    }
 }
+
+
+
+
+///////////////////////////////////////////////////////////////////
+//源代码：
+    Mat IRPhotoCalib::getCorrectedImage(Mat & image, PTAB & PT_params){     
+    //成员函数 getCorrectedImage，它的返回类型是 Mat（OpenCV中的矩阵类型，表示图像），参数是一个 Mat 类型的引用 image（输入图像）和一个 PTAB 类型的引用 PT_params（用于校正的参数）
+      Mat float_image, corrected_frame, colormap_corrected_frame;
+      //定义了三个 Mat 类型的局部变量
+      image.convertTo(float_image, CV_32FC1, 1/255.00);
+      //将输入图像转换为浮动类型
+      m_mutex.lock();
+      Mat corrected_float_frame = ((float_image * (float)(PT_params.a-PT_params.b) + (float)PT_params.b) - m_params_PS)*(float)255.0;
+      m_mutex.unlock();
+      Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> eigen_image = mapCV2Eigen(corrected_float_frame);
+      auto cyclic_eigen_image = eigen_image.unaryExpr([](const int x) { return x%256; }).cast<float>();
+
+      Mat cyclic_float_image = mapEigen2CV(cyclic_eigen_image);
+      //这里是源代码与修改后的代码最本质的区别--源代码用的自定义函数mapEigen2CV
+
+      cyclic_float_image.convertTo(corrected_frame, CV_8UC1, 1.00);
+      LUT(corrected_frame, m_lut, colormap_corrected_frame); 
+      return colormap_corrected_frame;
+    }
 
 /*
 Source: https://stackoverflow.com/questions/14783329/opencv-cvmat-and-eigenmatrix/21706778#21706778
@@ -438,9 +531,25 @@ Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> IRPhotoCal
   return M_Eigen;
 }
 
+
+//源代码：如果使用原来数据集会出现段错误，经过修改后bag文件没问题
 template <typename Derived>
 Mat IRPhotoCalib::mapEigen2CV(const Eigen::MatrixBase<Derived>& M_D_Eigen){
   Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M_Eigen = M_D_Eigen;
-  Mat M_OCV(M_Eigen.rows(), M_Eigen.cols(), CV_32FC1, M_Eigen.data());
+  Mat M_OCV(M_Eigen.rows(), M_Eigen.cols(), CV_32FC1, M_Eigen.data());//出错处
   return M_OCV;
 }
+
+// template <typename Derived>
+// Mat IRPhotoCalib::mapEigen2CV(const Eigen::MatrixBase<Derived>& M_D_Eigen) {
+//     Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M_Eigen = M_D_Eigen;
+    
+//     // 创建一个新的 OpenCV Mat 并复制 Eigen 矩阵的数据
+//     Mat M_OCV(M_Eigen.rows(), M_Eigen.cols(), CV_32FC1);
+//     std::memcpy(M_OCV.data, M_Eigen.data(), M_Eigen.size() * sizeof(float));
+    
+//     return M_OCV;
+// }
+
+
+

@@ -60,6 +60,8 @@ public:
     void getRelativeGains(double a1, double b1, double a2, double b2, double & a12, double & b12);
     void chainGains(double a01, double b01, double a12, double b12, double & a02, double & b02);
     double e_photo_error;
+    void ContrastEnhance(const cv::Mat &img_input, cv::Mat &img_output, float gamma, float to_low, float to_high);  // 类成员函数声明
+
 private:
     bool m_useKeyframes, m_calibrate_SP;
     vector<PTAB> m_params_PT;
